@@ -259,26 +259,28 @@ func (pv *ProgressView) renderNow() {
 	// Clear previous output
 	pv.clearLines()
 
-	// Write progress bars and cursor to start of next line
-	fmt.Fprintln(pv.writer, output)
+	// Write progress bars
+	fmt.Fprint(pv.writer, output)
 
-	// Track how many lines we've printed
-	// +1 for the newline we just added with Fprintln
-	lineCount := len(lines) + 1
+	// Save cursor position (after progress bars, before message area)
+	fmt.Fprint(pv.writer, "\033[s")
 
 	// Clear everything from cursor to end of screen
 	// This handles messages that wrap across multiple lines
 	fmt.Fprint(pv.writer, "\033[J")
 
-	// Write message if present
+	// Write message on new line if present
 	if pv.message != "" {
-		fmt.Fprintf(pv.writer, "Writing: %s", pv.message)
+		fmt.Fprintf(pv.writer, "\nWriting: %s", pv.message)
 	}
 
-	// Track state
+	// Restore cursor position (back to end of progress bars)
+	fmt.Fprint(pv.writer, "\033[u")
+
+	// Track state - only track progress bar lines
 	pv.lastRenderedState = output
 	pv.lastRenderedMessage = pv.message
-	pv.lastLines = lineCount
+	pv.lastLines = len(lines)
 	pv.lastUpdateTime = time.Now()
 }
 
@@ -328,16 +330,15 @@ func (pv *ProgressView) clearLines() {
 		return
 	}
 
-	// Move cursor to beginning of line
-	fmt.Fprint(pv.writer, "\r")
-
-	// Move cursor up (lastLines - 1) times to get to first line of our content
-	// We're already on the last line, so we move up (n-1) times
-	for i := 1; i < pv.lastLines; i++ {
+	// Move cursor up to first line of our content
+	for i := 0; i < pv.lastLines; i++ {
 		fmt.Fprint(pv.writer, "\033[A")
 	}
 
-	// Now clear from cursor to end of screen
+	// Move to beginning of line
+	fmt.Fprint(pv.writer, "\r")
+
+	// Clear from cursor to end of screen
 	// This clears all our content without touching lines above
 	fmt.Fprint(pv.writer, "\033[J")
 }
