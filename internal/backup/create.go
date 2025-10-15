@@ -1,30 +1,27 @@
 package backup
 
 import (
-	"log"
+	"fmt"
 	"os"
 )
 
-type Backup struct {
-	Path      string     `yaml:"path"`
-	Locations []Location `yaml:"data"`
-}
-
-func Create(config *Config) error {
-
-	log.Println("Starting backup creation...")
-
+// Create creates a backup of all configured locations
+func Create(config *Config, configPath string) error {
+	// Create output directory
 	err := os.MkdirAll(config.Output, 0755)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	err = BackupData(config)
-	if err != nil {
-		return err
+	// Copy config file to backup directory
+	if err := copyConfigToBackup(configPath, config.Output); err != nil {
+		return fmt.Errorf("failed to copy config: %w", err)
 	}
 
-	log.Println("Backup created successfully!")
+	// Backup all data locations
+	if err := BackupData(config); err != nil {
+		return err
+	}
 
 	return nil
 }

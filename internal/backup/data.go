@@ -5,12 +5,9 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 
 	"github.com/klauspost/pgzip"
 )
@@ -22,9 +19,10 @@ type Data struct {
 
 // Location represents a directory to backup with ignore patterns
 type Location struct {
-	Path   string   `yaml:"path"`
-	Ignore []string `yaml:"ignore"`
-	index  []string // Paths to include in backup
+	Path      string   `yaml:"path"`
+	Ignore    []string `yaml:"ignore"`
+	index     []string // Paths to include in backup
+	totalSize int64    // Total size of files to backup
 }
 
 // ArchiveWriter wraps tar.Writer with compression
@@ -34,52 +32,7 @@ type ArchiveWriter struct {
 	file *os.File
 }
 
-// BackupData creates compressed tar archives for all configured locations
-func BackupData(config *Config) error {
-	log.SetPrefix("[DATA] ")
-	defer log.SetPrefix("")
-
-	for _, loc := range config.Data.Locations {
-		if err := backupLocation(loc, config.Output); err != nil {
-			return fmt.Errorf("failed to backup %s: %w", loc.Path, err)
-		}
-	}
-
-	log.Println("Backup completed successfully!")
-	return nil
-}
-
-func backupLocation(loc Location, outputDir string) error {
-	// Normalize path
-	path, err := normalizePath(loc.Path)
-	if err != nil {
-		return err
-	}
-	loc.Path = path
-
-	// Scan directory
-	if err := loc.scan(); err != nil {
-		return fmt.Errorf("scan failed: %w", err)
-	}
-
-	// Create archive
-	filename := generateFilename(loc.Path)
-	archivePath := filepath.Join(outputDir, filename)
-
-	writer, err := newArchiveWriter(archivePath)
-	if err != nil {
-		return fmt.Errorf("failed to create archive: %w", err)
-	}
-	defer writer.Close()
-
-	// Write files
-	if err := loc.writeToArchive(writer); err != nil {
-		return fmt.Errorf("write failed: %w", err)
-	}
-
-	return nil
-}
-
+// normalizePath expands home directory and converts to absolute path
 func normalizePath(path string) (string, error) {
 	// Expand home directory
 	if len(path) > 1 && path[:2] == "~/" {
@@ -99,6 +52,7 @@ func normalizePath(path string) (string, error) {
 	return absPath, nil
 }
 
+// generateFilename creates a unique filename based on the path
 func generateFilename(path string) string {
 	h := sha256.New()
 	h.Write([]byte(path))
@@ -109,105 +63,7 @@ func generateFilename(path string) string {
 	)
 }
 
-func (l *Location) scan() error {
-	log.Printf("Scanning %s", l.Path)
-
-	l.index = make([]string, 0)
-
-	err := filepath.WalkDir(
-		l.Path,
-		func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-
-			// Skip root directory
-			if path == l.Path {
-				return nil
-			}
-
-			// Check ignore patterns
-			if slices.Contains(l.Ignore, d.Name()) {
-				log.Printf("Skipping %s", d.Name())
-				if d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			l.index = append(l.index, path)
-			return nil
-		},
-	)
-
-	if err != nil {
-		return fmt.Errorf("directory walk failed: %w", err)
-	}
-
-	log.Printf("Found %d files/directories", len(l.index))
-	return nil
-}
-
-func (l *Location) writeToArchive(w *ArchiveWriter) error {
-	for _, path := range l.index {
-		if err := l.writeEntry(w, path); err != nil {
-			return fmt.Errorf("failed to write %s: %w", path, err)
-		}
-	}
-	return nil
-}
-
-func (l *Location) writeEntry(w *ArchiveWriter, path string) error {
-	// Get current file info
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-
-	// Calculate relative path
-	relPath, err := filepath.Rel(l.Path, path)
-	if err != nil {
-		return err
-	}
-
-	// Create tar header
-	hdr, err := tar.FileInfoHeader(info, "")
-	if err != nil {
-		return err
-	}
-
-	// Prepend original directory name so extraction creates proper folder structure
-	hdr.Name = filepath.Join(filepath.Base(l.Path), relPath)
-	hdr.Format = tar.FormatPAX
-
-	log.Printf("Writing %s", relPath)
-
-	// Write header
-	if err := w.WriteHeader(hdr); err != nil {
-		return err
-	}
-
-	// Write file content
-	if !info.IsDir() {
-		if err := copyFileToArchive(w, path); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func copyFileToArchive(w io.Writer, path string) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = io.Copy(w, file)
-	return err
-}
-
+// newArchiveWriter creates a new compressed tar archive writer
 func newArchiveWriter(path string) (*ArchiveWriter, error) {
 	file, err := os.Create(path)
 	if err != nil {
@@ -233,6 +89,7 @@ func newArchiveWriter(path string) (*ArchiveWriter, error) {
 	}, nil
 }
 
+// Close closes the archive writer and all underlying writers
 func (w *ArchiveWriter) Close() error {
 	return errors.Join(
 		w.tar.Close(),
@@ -241,10 +98,12 @@ func (w *ArchiveWriter) Close() error {
 	)
 }
 
+// WriteHeader writes a tar header to the archive
 func (w *ArchiveWriter) WriteHeader(hdr *tar.Header) error {
 	return w.tar.WriteHeader(hdr)
 }
 
+// Write writes data to the archive
 func (w *ArchiveWriter) Write(p []byte) (int, error) {
 	return w.tar.Write(p)
 }
