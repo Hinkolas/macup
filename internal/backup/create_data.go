@@ -44,7 +44,12 @@ func BackupData(config *Config) error {
 
 // backupLocation creates a backup archive for a single location
 func backupLocation(loc Location, outputDir string, pv *tui.ProgressView) error {
-	// Normalize path
+	// Generate filename hash from ORIGINAL config path (before normalization)
+	// This ensures the hash is consistent regardless of which user restores
+	filename := generateFilename(loc.Path)
+	archivePath := filepath.Join(outputDir, filename)
+
+	// Normalize path for actual file operations
 	path, err := normalizePath(loc.Path)
 	if err != nil {
 		return err
@@ -57,8 +62,6 @@ func backupLocation(loc Location, outputDir string, pv *tui.ProgressView) error 
 	}
 
 	// Create archive
-	filename := generateFilename(loc.Path)
-	archivePath := filepath.Join(outputDir, filename)
 
 	writer, err := newArchiveWriter(archivePath)
 	if err != nil {

@@ -13,15 +13,16 @@ import (
 
 // restoreLocation restores a single location from its archive
 func restoreLocation(loc Location, backupDir string) error {
-	// Normalize the target path
+	// Generate the archive filename based on the ORIGINAL config path (before normalization)
+	// This must match the hash used during backup creation
+	archiveName := generateFilename(loc.Path)
+	archivePath := filepath.Join(backupDir, archiveName)
+
+	// Normalize the target path for actual file operations
 	targetPath, err := normalizePath(loc.Path)
 	if err != nil {
 		return fmt.Errorf("failed to normalize path: %w", err)
 	}
-
-	// Generate the archive filename based on the original path
-	archiveName := generateFilename(targetPath)
-	archivePath := filepath.Join(backupDir, archiveName)
 
 	// Check if archive exists
 	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
