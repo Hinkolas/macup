@@ -42,6 +42,7 @@ type ProgressView struct {
 	items               map[string]*ProgressItem
 	order               []string  // Maintain insertion order
 	message             string    // Current status message
+	messagePrefix       string    // Prefix for status messages (e.g., "Writing", "Extracting")
 	lastRenderedState   string    // Last rendered output (progress bars only)
 	lastRenderedMessage string    // Last rendered message
 	lastUpdateTime      time.Time // Last screen update time
@@ -51,12 +52,17 @@ type ProgressView struct {
 	cursorHidden        bool // Track if cursor is hidden
 }
 
-// NewProgressView creates a new progress view
-func NewProgressView() *ProgressView {
+// NewProgressView creates a new progress view with a custom message prefix
+func NewProgressView(messagePrefix string) *ProgressView {
+	if messagePrefix == "" {
+		messagePrefix = "Processing"
+	}
+
 	pv := &ProgressView{
-		items:  make(map[string]*ProgressItem),
-		order:  make([]string, 0),
-		writer: os.Stdout,
+		items:         make(map[string]*ProgressItem),
+		order:         make([]string, 0),
+		writer:        os.Stdout,
+		messagePrefix: messagePrefix,
 	}
 
 	// Set up signal handler for Ctrl+C
@@ -271,7 +277,7 @@ func (pv *ProgressView) renderNow() {
 
 	// Write message on new line if present
 	if pv.message != "" {
-		fmt.Fprintf(pv.writer, "\nWriting: %s", pv.message)
+		fmt.Fprintf(pv.writer, "\n%s: %s", pv.messagePrefix, pv.message)
 	}
 
 	// Restore cursor position (back to end of progress bars)

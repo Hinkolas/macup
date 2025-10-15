@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/hinkolas/macup/internal/tui"
 	"github.com/klauspost/pgzip"
 )
 
 // restoreLocation restores a single location from its archive
-func restoreLocation(loc Location, backupDir string) error {
+func restoreLocation(loc Location, backupDir string, pv *tui.ProgressView) error {
 	// Generate the archive filename based on the ORIGINAL config path (before normalization)
 	// This must match the hash used during backup creation
 	archiveName := generateFilename(loc.Path)
@@ -29,22 +31,33 @@ func restoreLocation(loc Location, backupDir string) error {
 		return fmt.Errorf("archive not found: %s", archivePath)
 	}
 
-	// Extract the archive
-	if err := extractArchive(archivePath, targetPath); err != nil {
+	// Extract the archive with progress tracking
+	if err := extractArchive(archivePath, targetPath, pv); err != nil {
 		return fmt.Errorf("extraction failed: %w", err)
 	}
+
+	// Mark as done
+	pv.Message("")
+	pv.Done(targetPath, true)
 
 	return nil
 }
 
-// extractArchive extracts a tar.gz archive to the target directory
-func extractArchive(archivePath, targetPath string) error {
+// extractArchive extracts a tar.gz archive to the target directory with progress tracking
+func extractArchive(archivePath, targetPath string, pv *tui.ProgressView) error {
 	// Open the archive file
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("failed to open archive: %w", err)
 	}
 	defer file.Close()
+
+	// Get archive size for progress tracking
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to get archive info: %w", err)
+	}
+	archiveSize := fileInfo.Size()
 
 	// Create gzip reader
 	gzipReader, err := pgzip.NewReader(file)
@@ -59,6 +72,11 @@ func extractArchive(archivePath, targetPath string) error {
 	// Get the parent directory where we'll extract
 	parentDir := filepath.Dir(targetPath)
 
+	// Track progress
+	var bytesProcessed int64
+	startTime := time.Now()
+	fileCount := 0
+
 	// Extract all files
 	for {
 		header, err := tarReader.Next()
@@ -68,6 +86,9 @@ func extractArchive(archivePath, targetPath string) error {
 		if err != nil {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
+
+		fileCount++
+		bytesProcessed += header.Size
 
 		// Construct the full path for extraction
 		// The archive contains paths like "foldername/subfolder/file.txt"
@@ -80,6 +101,29 @@ func extractArchive(archivePath, targetPath string) error {
 		if !strings.HasPrefix(cleanPath, cleanParent+string(filepath.Separator)) &&
 			cleanPath != cleanParent {
 			return fmt.Errorf("illegal file path in archive: %s", header.Name)
+		}
+
+		// Update progress every 50 files
+		if fileCount%50 == 0 {
+			pv.Message(extractPath)
+
+			// Calculate progress and ETA
+			progress := float64(bytesProcessed) / float64(archiveSize)
+			if progress > 1.0 {
+				progress = 1.0
+			}
+
+			elapsed := time.Since(startTime)
+			var eta time.Duration
+			if progress > 0 && progress < 1.0 {
+				totalTime := time.Duration(float64(elapsed) / progress)
+				eta = totalTime - elapsed
+				if eta < 0 {
+					eta = 0
+				}
+			}
+
+			pv.Set(targetPath, progress, eta)
 		}
 
 		switch header.Typeflag {
@@ -112,6 +156,9 @@ func extractArchive(archivePath, targetPath string) error {
 			}
 		}
 	}
+
+	// Final progress update
+	pv.Set(targetPath, 1.0, 0)
 
 	return nil
 }
