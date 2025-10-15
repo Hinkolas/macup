@@ -14,8 +14,8 @@ import (
 
 // BackupData creates compressed tar archives for all configured locations
 func BackupData(config *Config) error {
-	// Create progress view
-	pv := tui.NewProgressView()
+	// Create progress view with "Archiving" prefix
+	pv := tui.NewProgressView("Archiving")
 
 	// Initialize all locations in progress view
 	for _, loc := range config.Data.Locations {
