@@ -41,7 +41,8 @@ var createCmd = &cobra.Command{
 		}
 
 		// Create a new backup with the specified configuration
-		err = backup.Create(config)
+		configPath := cmd.Flag("config").Value.String()
+		err = backup.Create(config, configPath)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
