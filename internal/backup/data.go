@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 
 	"github.com/klauspost/pgzip"
 )
@@ -37,6 +38,8 @@ func BackupData(config *Config) error {
 
 	var err error
 	for _, location := range config.Data.Locations {
+
+		// TODO: Warn if backup output in inside location.Path
 
 		// Generate a unique filename based on the location path
 		h := sha256.New()
@@ -108,6 +111,15 @@ func (l *Location) scan() error {
 			return err
 		}
 
+		// Skip directory or file if matching ignore patterns
+		if slices.Contains(l.Ignore, info.Name()) {
+			fmt.Println("Skipping:", info.Name())
+			if info.IsDir() {
+				return filepath.SkipDir // Skip the entire directory tree
+			}
+			return nil // Skip just this file
+		}
+
 		l.size += info.Size()
 		l.index = append(l.index, IndexEntry{
 			Path: path,
@@ -125,6 +137,8 @@ func (l *Location) scan() error {
 
 }
 
+// TODO: Fix error `failed to filter location: archive/tar: write too long` e.g.
+// /Users/nhinke/playground/esp32/distance-sensor/build/esp-idf/mbedtls/mbedtls/library/error.c
 func (l *Location) write(tw *ArchiveWriter) error {
 
 	for _, e := range l.index {
@@ -140,6 +154,7 @@ func (l *Location) write(tw *ArchiveWriter) error {
 			return err
 		}
 		hdr.Name = relPath
+		// hdr.Format = tar.FormatPAX
 
 		log.Printf("Writing %s\n", e.Path)
 
@@ -157,6 +172,7 @@ func (l *Location) write(tw *ArchiveWriter) error {
 			defer file.Close()
 
 			if _, err := io.Copy(tw, file); err != nil {
+				fmt.Println("error on file ", e.Path)
 				return err
 			}
 
