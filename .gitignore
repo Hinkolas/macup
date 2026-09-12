@@ -4,3 +4,5 @@ config.yaml
 *.env
 
 macup
+# Build output
+/main
