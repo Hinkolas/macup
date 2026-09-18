@@ -64,9 +64,15 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 	}
 	archiveSize := fileInfo.Size()
 
+	// Progress is measured in compressed bytes read from the archive, which
+	// is the only total known before extracting. Decompression reads a few
+	// MB ahead of extraction, so progress leads slightly on small archives.
+	tracker := startProgress(pv, targetPath, archiveSize)
+	defer tracker.finish()
+
 	// Create gzip reader. pgzip otherwise reads the archive through a 4KB
 	// buffer, which makes reading it syscall-bound.
-	gzipReader, err := pgzip.NewReader(bufio.NewReaderSize(file, 1<<20))
+	gzipReader, err := pgzip.NewReader(bufio.NewReaderSize(countingReader{file, tracker}, 1<<20))
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
@@ -98,11 +104,6 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 		return nil
 	}
 
-	// Track progress
-	var bytesProcessed int64
-	startTime := time.Now()
-	fileCount := 0
-
 	// Extract all files
 	for {
 		if err := ctx.Err(); err != nil {
@@ -117,9 +118,6 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
-		fileCount++
-		bytesProcessed += header.Size
-
 		// Construct the full path for extraction
 		// The archive contains paths like "foldername/subfolder/file.txt"
 		// We want to extract to "parentDir/foldername/subfolder/file.txt"
@@ -133,28 +131,7 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 			return fmt.Errorf("illegal file path in archive: %s", header.Name)
 		}
 
-		// Update progress every 50 files
-		if fileCount%50 == 0 {
-			pv.Message(extractPath)
-
-			// Calculate progress and ETA
-			progress := float64(bytesProcessed) / float64(archiveSize)
-			if progress > 1.0 {
-				progress = 1.0
-			}
-
-			elapsed := time.Since(startTime)
-			var eta time.Duration
-			if progress > 0 && progress < 1.0 {
-				totalTime := time.Duration(float64(elapsed) / progress)
-				eta = totalTime - elapsed
-				if eta < 0 {
-					eta = 0
-				}
-			}
-
-			pv.Set(targetPath, progress, eta)
-		}
+		pv.Message(extractPath)
 
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -215,6 +192,7 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 	}
 
 	// Final progress update
+	tracker.finish()
 	pv.Set(targetPath, 1.0, 0)
 
 	return nil
