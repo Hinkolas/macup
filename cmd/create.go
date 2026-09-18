@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/hinkolas/macup/internal/backup"
 	"github.com/spf13/cobra"
@@ -41,12 +44,12 @@ var createCmd = &cobra.Command{
 		}
 
 		// Create a new backup with the specified configuration
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
 		configPath := cmd.Flag("config").Value.String()
-		err = backup.Create(config, configPath)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
+		err = backup.Create(ctx, config, configPath)
+		exitOnError(err)
 
 	},
 }

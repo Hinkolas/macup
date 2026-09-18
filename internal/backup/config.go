@@ -1,14 +1,16 @@
 package backup
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/viper"
 )
 
+// Config is decoded by viper, which uses mapstructure tags (not yaml tags).
 type Config struct {
-	Output string `yaml:"output"`
-	Data   Data   `yaml:"data"`
+	Output string `mapstructure:"output"`
+	Data   Data   `mapstructure:"data"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -27,6 +29,11 @@ func LoadConfig(path string) (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to decode config: %w", err)
+	}
+
+	// Fail loudly on a misspelled key instead of silently backing up nothing
+	if len(cfg.Data.Locations) == 0 {
+		return nil, errors.New("no locations configured under data.locations")
 	}
 
 	return &cfg, nil

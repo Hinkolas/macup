@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -26,4 +28,18 @@ func Execute() {
 		os.Exit(1)
 	}
 
+}
+
+// exitOnError prints err and exits, using the conventional code 130 when the
+// operation was cancelled by an interrupt signal
+func exitOnError(err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		fmt.Println("Cancelled.")
+		os.Exit(130)
+	}
+	fmt.Println(err)
+	os.Exit(1)
 }

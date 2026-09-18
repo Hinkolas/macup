@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -65,27 +63,7 @@ func NewProgressView(messagePrefix string) *ProgressView {
 		messagePrefix: messagePrefix,
 	}
 
-	// Set up signal handler for Ctrl+C
-	pv.setupSignalHandler()
-
 	return pv
-}
-
-// setupSignalHandler sets up handling for interrupt signals
-func (pv *ProgressView) setupSignalHandler() {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		// Show cursor before exiting
-		pv.mu.Lock()
-		if pv.cursorHidden {
-			pv.showCursor()
-		}
-		pv.mu.Unlock()
-		os.Exit(130) // Standard exit code for Ctrl+C
-	}()
 }
 
 // IsTerminal checks if stdout is a terminal (TTY)
