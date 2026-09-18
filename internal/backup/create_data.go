@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"time"
 
 	"github.com/hinkolas/macup/internal/tui"
 )
@@ -266,9 +265,16 @@ func (l *Location) writeToArchive(ctx context.Context, w *ArchiveWriter, pv *tui
 		}
 	}()
 
-	var bytesWritten int64
-	startTime := time.Now()
-	i := 0
+	// Track content bytes as they are written, so large files show progress
+	// while they are copied. Locations with only empty files and directories
+	// count entries instead.
+	byEntries := l.totalSize == 0
+	total := l.totalSize
+	if byEntries {
+		total = int64(len(l.index))
+	}
+	tracker := startProgress(pv, l.Path, total)
+	defer tracker.finish()
 
 	for out := range ordered {
 		p := <-out
@@ -279,49 +285,25 @@ func (l *Location) writeToArchive(ctx context.Context, w *ArchiveWriter, pv *tui
 			return err
 		}
 
-		// Update message every 50 files to reduce flicker
-		if i%50 == 0 {
-			pv.Message(p.path)
-		}
+		pv.Message(p.path)
 
 		if p.warning != "" {
 			l.warnings = append(l.warnings, p.warning)
 		}
+
+		switch {
+		case byEntries:
+			tracker.add(1)
+		case p.skip && p.info.Mode().IsRegular():
+			// Count skipped files as done so progress still reaches the total
+			tracker.add(p.info.Size())
+		}
+
 		if !p.skip {
-			if err := l.writeEntry(ctx, w, p); err != nil {
+			if err := l.writeEntry(ctx, w, p, tracker); err != nil {
 				return fmt.Errorf("failed to write %s: %w", p.path, err)
 			}
-			if p.info.Mode().IsRegular() {
-				bytesWritten += p.info.Size()
-			}
 		}
-		i++
-
-		// Calculate progress (handle edge case of empty directories)
-		var progress float64
-		if l.totalSize > 0 {
-			progress = float64(bytesWritten) / float64(l.totalSize)
-			if progress > 1.0 {
-				progress = 1.0
-			}
-		} else {
-			// For empty directories, use file count
-			progress = float64(i) / float64(len(l.index))
-		}
-
-		// Calculate ETA
-		elapsed := time.Since(startTime)
-		var eta time.Duration
-		if progress > 0 && progress < 1.0 {
-			totalTime := time.Duration(float64(elapsed) / progress)
-			eta = totalTime - elapsed
-			if eta < 0 {
-				eta = 0
-			}
-		}
-
-		// Update progress view (the view itself will decide if it needs to re-render)
-		pv.Set(l.Path, progress, eta)
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -329,13 +311,14 @@ func (l *Location) writeToArchive(ctx context.Context, w *ArchiveWriter, pv *tui
 	}
 
 	// Final update to ensure we show 100%
+	tracker.finish()
 	pv.Set(l.Path, 1.0, 0)
 
 	return nil
 }
 
 // writeEntry writes a prepared file, directory or symlink entry to the archive
-func (l *Location) writeEntry(ctx context.Context, w *ArchiveWriter, p preparedEntry) error {
+func (l *Location) writeEntry(ctx context.Context, w *ArchiveWriter, p preparedEntry, tracker *progressTracker) error {
 	if p.file != nil {
 		defer p.file.Close()
 	}
@@ -361,8 +344,15 @@ func (l *Location) writeEntry(ctx context.Context, w *ArchiveWriter, p preparedE
 		return err
 	}
 
+	// Count content bytes for progress; the tracker ignores them when
+	// counting entries
+	cw := io.Writer(w)
+	if l.totalSize > 0 {
+		cw = countingWriter{w, tracker}
+	}
+
 	if p.data != nil {
-		_, err := w.Write(p.data)
+		_, err := cw.Write(p.data)
 		return err
 	}
 	if p.file == nil {
@@ -371,13 +361,13 @@ func (l *Location) writeEntry(ctx context.Context, w *ArchiveWriter, p preparedE
 
 	// Stream large files, copying exactly the size recorded in the header;
 	// growth is truncated
-	n, err := io.CopyN(w, ctxReader{ctx, p.file}, hdr.Size)
+	n, err := io.CopyN(cw, ctxReader{ctx, p.file}, hdr.Size)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		// The file shrank or failed mid-read; pad so the archive stays valid
-		if _, padErr := io.CopyN(w, zeroReader{}, hdr.Size-n); padErr != nil {
+		if _, padErr := io.CopyN(cw, zeroReader{}, hdr.Size-n); padErr != nil {
 			return padErr
 		}
 		l.warnings = append(l.warnings, fmt.Sprintf("%s: changed during backup, archived copy is incomplete (%v)", p.path, err))
