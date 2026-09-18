@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/klauspost/pgzip"
 )
@@ -22,6 +23,10 @@ const (
 	// Number of goroutines reading files during backup or writing them during
 	// restore. More workers mostly add file system lock contention on APFS.
 	ioWorkers = 4
+	// Compressed chunks queued for the archive file. Destinations such as
+	// USB drives accept writes in bursts and then stall while flushing; the
+	// queue lets compression continue through a stall instead of waiting.
+	archiveWriteQueue = 64
 )
 
 // Data contains backup configuration for multiple locations
@@ -47,10 +52,11 @@ type indexEntry struct {
 // ArchiveWriter wraps tar.Writer with compression. The archive is written to
 // a temporary file and only moved to its final path by a successful Close.
 type ArchiveWriter struct {
-	tar  *tar.Writer
-	gzip *pgzip.Writer
-	file *os.File
-	path string
+	tar   *tar.Writer
+	gzip  *pgzip.Writer
+	queue *queuedWriter
+	file  *os.File
+	path  string
 }
 
 // normalizePath expands home directory and converts to absolute path
@@ -91,11 +97,13 @@ func newArchiveWriter(path string) (*ArchiveWriter, error) {
 		return nil, err
 	}
 
+	queue := newQueuedWriter(file, archiveWriteQueue)
 	gzipWriter, err := pgzip.NewWriterLevel(
-		file,
+		queue,
 		pgzip.DefaultCompression,
 	)
 	if err != nil {
+		queue.Close()
 		file.Close()
 		os.Remove(file.Name())
 		return nil, err
@@ -105,10 +113,11 @@ func newArchiveWriter(path string) (*ArchiveWriter, error) {
 	gzipWriter.SetConcurrency(1<<20, runtime.NumCPU())
 
 	return &ArchiveWriter{
-		tar:  tar.NewWriter(gzipWriter),
-		gzip: gzipWriter,
-		file: file,
-		path: path,
+		tar:   tar.NewWriter(gzipWriter),
+		gzip:  gzipWriter,
+		queue: queue,
+		file:  file,
+		path:  path,
 	}, nil
 }
 
@@ -118,6 +127,7 @@ func (w *ArchiveWriter) Close() error {
 	err := errors.Join(
 		w.tar.Close(),
 		w.gzip.Close(),
+		w.queue.Close(),
 		w.file.Close(),
 	)
 	if err == nil {
@@ -133,6 +143,7 @@ func (w *ArchiveWriter) Close() error {
 func (w *ArchiveWriter) Abort() {
 	w.tar.Close()
 	w.gzip.Close()
+	w.queue.Close()
 	w.file.Close()
 	os.Remove(w.file.Name())
 }
@@ -145,6 +156,68 @@ func (w *ArchiveWriter) WriteHeader(hdr *tar.Header) error {
 // Write writes data to the archive
 func (w *ArchiveWriter) Write(p []byte) (int, error) {
 	return w.tar.Write(p)
+}
+
+// queuedWriter writes to w from a background goroutine, holding up to size
+// writes in a queue. A write error is returned by a later Write or by Close.
+type queuedWriter struct {
+	w      io.Writer
+	queue  chan []byte
+	done   chan struct{}
+	mu     sync.Mutex
+	err    error
+	closed bool
+}
+
+func newQueuedWriter(w io.Writer, size int) *queuedWriter {
+	q := &queuedWriter{
+		w:     w,
+		queue: make(chan []byte, size),
+		done:  make(chan struct{}),
+	}
+
+	go func() {
+		defer close(q.done)
+		// Keep draining after an error so Write never blocks on a full queue
+		for p := range q.queue {
+			if q.error() != nil {
+				continue
+			}
+			if _, err := q.w.Write(p); err != nil {
+				q.mu.Lock()
+				q.err = err
+				q.mu.Unlock()
+			}
+		}
+	}()
+
+	return q
+}
+
+func (q *queuedWriter) error() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.err
+}
+
+// Write queues a copy of p, since callers may reuse p once Write returns
+func (q *queuedWriter) Write(p []byte) (int, error) {
+	if err := q.error(); err != nil {
+		return 0, err
+	}
+	q.queue <- append([]byte(nil), p...)
+	return len(p), nil
+}
+
+// Close waits until all queued writes are done and returns the first error.
+// It is safe to call more than once.
+func (q *queuedWriter) Close() error {
+	if !q.closed {
+		q.closed = true
+		close(q.queue)
+	}
+	<-q.done
+	return q.error()
 }
 
 // ctxReader makes reads fail once ctx is cancelled, so copying a single large
