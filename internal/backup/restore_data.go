@@ -2,6 +2,8 @@ package backup
 
 import (
 	"archive/tar"
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hinkolas/macup/internal/tui"
@@ -61,8 +64,9 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 	}
 	archiveSize := fileInfo.Size()
 
-	// Create gzip reader
-	gzipReader, err := pgzip.NewReader(file)
+	// Create gzip reader. pgzip otherwise reads the archive through a 4KB
+	// buffer, which makes reading it syscall-bound.
+	gzipReader, err := pgzip.NewReader(bufio.NewReaderSize(file, 1<<20))
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
@@ -74,6 +78,26 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 	// Get the parent directory where we'll extract
 	parentDir := filepath.Dir(targetPath)
 
+	// Small files are written by a pool of workers, since creating many
+	// small files one after another is bound by open/close latency
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	fw := newFileWriterPool(ctx, cancel)
+	defer fw.wait()
+
+	// Directories already created, to avoid a MkdirAll per file
+	dirs := make(map[string]struct{})
+	ensureDir := func(dir string, mode os.FileMode) error {
+		if _, ok := dirs[dir]; ok {
+			return nil
+		}
+		if err := os.MkdirAll(dir, mode); err != nil {
+			return err
+		}
+		dirs[dir] = struct{}{}
+		return nil
+	}
+
 	// Track progress
 	var bytesProcessed int64
 	startTime := time.Now()
@@ -82,7 +106,7 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 	// Extract all files
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return fw.errOr(err)
 		}
 
 		header, err := tarReader.Next()
@@ -135,24 +159,41 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 		switch header.Typeflag {
 		case tar.TypeDir:
 			// Create directory
-			if err := os.MkdirAll(extractPath, os.FileMode(header.Mode)); err != nil {
+			if err := ensureDir(extractPath, os.FileMode(header.Mode)); err != nil {
 				return fmt.Errorf("failed to create directory %s: %w", extractPath, err)
 			}
 
 		case tar.TypeReg:
 			// Create parent directories if they don't exist
-			if err := os.MkdirAll(filepath.Dir(extractPath), 0755); err != nil {
+			if err := ensureDir(filepath.Dir(extractPath), 0755); err != nil {
 				return fmt.Errorf("failed to create parent directory: %w", err)
 			}
 
-			// Create and write file
-			if err := extractFile(ctxReader{ctx, tarReader}, extractPath, os.FileMode(header.Mode)); err != nil {
-				return fmt.Errorf("failed to extract file %s: %w", extractPath, err)
+			job := fileJob{
+				path:    extractPath,
+				mode:    os.FileMode(header.Mode),
+				modTime: header.ModTime,
+			}
+
+			// Stream large files directly; buffer small ones for the workers
+			if header.Size > smallFileLimit {
+				if err := job.write(ctxReader{ctx, tarReader}); err != nil {
+					return fmt.Errorf("failed to extract file %s: %w", extractPath, err)
+				}
+				continue
+			}
+
+			job.data = make([]byte, header.Size)
+			if _, err := io.ReadFull(tarReader, job.data); err != nil {
+				return fmt.Errorf("failed to read %s from archive: %w", header.Name, err)
+			}
+			if !fw.submit(job) {
+				return fw.errOr(ctx.Err())
 			}
 
 		case tar.TypeSymlink:
 			// Create parent directories if they don't exist
-			if err := os.MkdirAll(filepath.Dir(extractPath), 0755); err != nil {
+			if err := ensureDir(filepath.Dir(extractPath), 0755); err != nil {
 				return fmt.Errorf("failed to create parent directory: %w", err)
 			}
 
@@ -168,25 +209,110 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 		}
 	}
 
+	// Wait for all queued files to be written
+	if err := fw.wait(); err != nil {
+		return err
+	}
+
 	// Final progress update
 	pv.Set(targetPath, 1.0, 0)
 
 	return nil
 }
 
-// extractFile extracts a single file from the tar reader
-func extractFile(tarReader io.Reader, path string, mode os.FileMode) error {
-	// Create the file
-	outFile, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+// fileJob is a regular file to be written during restore
+type fileJob struct {
+	path    string
+	mode    os.FileMode
+	modTime time.Time
+	data    []byte
+}
+
+// write creates the file with content from r and restores its modification time
+func (j fileJob) write(r io.Reader) error {
+	outFile, err := os.OpenFile(j.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, j.mode)
 	if err != nil {
 		return err
 	}
 
 	// Copy content
-	if _, err := io.Copy(outFile, tarReader); err != nil {
+	if _, err := io.Copy(outFile, r); err != nil {
 		outFile.Close()
 		return err
 	}
 
-	return outFile.Close()
+	if err := outFile.Close(); err != nil {
+		return err
+	}
+
+	return os.Chtimes(j.path, j.modTime, j.modTime)
+}
+
+// fileWriterPool writes buffered files concurrently. The first error cancels
+// the restore.
+type fileWriterPool struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	jobs   chan fileJob
+	wg     sync.WaitGroup
+	once   sync.Once
+	mu     sync.Mutex
+	err    error
+}
+
+func newFileWriterPool(ctx context.Context, cancel context.CancelFunc) *fileWriterPool {
+	p := &fileWriterPool{
+		ctx:    ctx,
+		cancel: cancel,
+		jobs:   make(chan fileJob, 2*ioWorkers),
+	}
+	for range ioWorkers {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			for job := range p.jobs {
+				if err := job.write(bytes.NewReader(job.data)); err != nil {
+					p.fail(fmt.Errorf("failed to extract file %s: %w", job.path, err))
+				}
+			}
+		}()
+	}
+	return p
+}
+
+// submit queues a job and reports false if the restore was cancelled
+func (p *fileWriterPool) submit(job fileJob) bool {
+	select {
+	case p.jobs <- job:
+		return true
+	case <-p.ctx.Done():
+		return false
+	}
+}
+
+func (p *fileWriterPool) fail(err error) {
+	p.mu.Lock()
+	if p.err == nil {
+		p.err = err
+	}
+	p.mu.Unlock()
+	p.cancel()
+}
+
+// errOr returns the first worker error, or fallback if there was none
+func (p *fileWriterPool) errOr(fallback error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err != nil {
+		return p.err
+	}
+	return fallback
+}
+
+// wait stops accepting jobs, waits for queued files and returns the first
+// worker error. It is safe to call more than once.
+func (p *fileWriterPool) wait() error {
+	p.once.Do(func() { close(p.jobs) })
+	p.wg.Wait()
+	return p.errOr(nil)
 }

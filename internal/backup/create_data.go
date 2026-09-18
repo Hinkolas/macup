@@ -98,9 +98,10 @@ func backupLocation(ctx context.Context, loc Location, outputDir string, pv *tui
 	return loc.warnings, nil
 }
 
-// scan walks through the location directory and builds an index of files to backup
+// scan walks through the location directory and builds an index of files to
+// backup. The file info from the walk is kept so each file is only stat'ed once.
 func (l *Location) scan(pv *tui.ProgressView) error {
-	l.index = make([]string, 0)
+	l.index = make([]indexEntry, 0)
 	l.totalSize = 0
 	l.warnings = nil
 
@@ -133,13 +134,18 @@ func (l *Location) scan(pv *tui.ProgressView) error {
 				return nil
 			}
 
-			l.index = append(l.index, path)
+			// Lstat the entry (DirEntry.Info does not follow symlinks)
+			info, err := d.Info()
+			if err != nil {
+				l.warnings = append(l.warnings, err.Error())
+				return nil
+			}
+
+			l.index = append(l.index, indexEntry{path: path, info: info})
 
 			// Calculate total size for progress tracking
-			if d.Type().IsRegular() {
-				if info, err := d.Info(); err == nil {
-					l.totalSize += info.Size()
-				}
+			if info.Mode().IsRegular() {
+				l.totalSize += info.Size()
 			}
 
 			return nil
@@ -153,28 +159,143 @@ func (l *Location) scan(pv *tui.ProgressView) error {
 	return nil
 }
 
+// preparedEntry is an index entry made ready for writing by a reader worker
+type preparedEntry struct {
+	indexEntry
+	link    string   // Symlink target
+	data    []byte   // Content of small regular files
+	file    *os.File // Open handle for large regular files, streamed by the writer
+	skip    bool     // Entry is left out of the archive
+	warning string
+}
+
+// prefetch prepares index entries on a pool of workers so opening and reading
+// small files overlaps with compression. Results are delivered in index order;
+// each channel read from the returned channel yields exactly one entry.
+func (l *Location) prefetch(ctx context.Context) <-chan chan preparedEntry {
+	type job struct {
+		entry indexEntry
+		out   chan preparedEntry
+	}
+
+	// The window bounds memory to roughly window * smallFileLimit
+	const window = 64
+	ordered := make(chan chan preparedEntry, window)
+	jobs := make(chan job, window)
+
+	go func() {
+		defer close(ordered)
+		defer close(jobs)
+		for _, entry := range l.index {
+			out := make(chan preparedEntry, 1)
+			select {
+			case ordered <- out:
+			case <-ctx.Done():
+				return
+			}
+			jobs <- job{entry, out}
+		}
+	}()
+
+	for range ioWorkers {
+		go func() {
+			for j := range jobs {
+				j.out <- prepareEntry(ctx, j.entry)
+			}
+		}()
+	}
+
+	return ordered
+}
+
+// prepareEntry reads what the writer needs for one entry. Entries that can't
+// be read or aren't supported are marked as skipped with a warning.
+func prepareEntry(ctx context.Context, e indexEntry) preparedEntry {
+	p := preparedEntry{indexEntry: e}
+	if ctx.Err() != nil {
+		p.skip = true
+		return p
+	}
+
+	switch mode := e.info.Mode(); {
+	case mode.IsDir():
+	case mode&os.ModeSymlink != 0:
+		link, err := os.Readlink(e.path)
+		if err != nil {
+			p.skip, p.warning = true, err.Error()
+		}
+		p.link = link
+	case mode.IsRegular():
+		file, err := os.Open(e.path)
+		if err != nil {
+			p.skip, p.warning = true, err.Error()
+			return p
+		}
+		if e.info.Size() > smallFileLimit {
+			p.file = file
+			return p
+		}
+		defer file.Close()
+
+		// Read exactly the size recorded during the scan. If the file shrank
+		// the rest stays zero, which keeps the archive valid.
+		p.data = make([]byte, e.info.Size())
+		if n, err := io.ReadFull(file, p.data); err != nil {
+			p.warning = fmt.Sprintf("%s: changed during backup, archived copy is incomplete (read %d of %d bytes)", e.path, n, len(p.data))
+		}
+	default:
+		p.skip = true
+		p.warning = fmt.Sprintf("%s: unsupported file type (socket, named pipe or device)", e.path)
+	}
+
+	return p
+}
+
 // writeToArchive writes all indexed files to the archive
 func (l *Location) writeToArchive(ctx context.Context, w *ArchiveWriter, pv *tui.ProgressView) error {
+	ctx, cancel := context.WithCancel(ctx)
+	ordered := l.prefetch(ctx)
+
+	// On early return, stop the prefetcher and close files it already opened
+	defer func() {
+		cancel()
+		for out := range ordered {
+			if p := <-out; p.file != nil {
+				p.file.Close()
+			}
+		}
+	}()
+
 	var bytesWritten int64
 	startTime := time.Now()
+	i := 0
 
-	for i, path := range l.index {
+	for out := range ordered {
+		p := <-out
 		if err := ctx.Err(); err != nil {
+			if p.file != nil {
+				p.file.Close()
+			}
 			return err
 		}
 
 		// Update message every 50 files to reduce flicker
 		if i%50 == 0 {
-			pv.Message(path)
+			pv.Message(p.path)
 		}
 
-		size, err := l.writeEntry(ctx, w, path)
-		if err != nil {
-			return fmt.Errorf("failed to write %s: %w", path, err)
+		if p.warning != "" {
+			l.warnings = append(l.warnings, p.warning)
 		}
-
-		// Update progress
-		bytesWritten += size
+		if !p.skip {
+			if err := l.writeEntry(ctx, w, p); err != nil {
+				return fmt.Errorf("failed to write %s: %w", p.path, err)
+			}
+			if p.info.Mode().IsRegular() {
+				bytesWritten += p.info.Size()
+			}
+		}
+		i++
 
 		// Calculate progress (handle edge case of empty directories)
 		var progress float64
@@ -185,7 +306,7 @@ func (l *Location) writeToArchive(ctx context.Context, w *ArchiveWriter, pv *tui
 			}
 		} else {
 			// For empty directories, use file count
-			progress = float64(i+1) / float64(len(l.index))
+			progress = float64(i) / float64(len(l.index))
 		}
 
 		// Calculate ETA
@@ -203,57 +324,32 @@ func (l *Location) writeToArchive(ctx context.Context, w *ArchiveWriter, pv *tui
 		pv.Set(l.Path, progress, eta)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Final update to ensure we show 100%
 	pv.Set(l.Path, 1.0, 0)
 
 	return nil
 }
 
-// writeEntry writes a single file, directory or symlink entry to the archive
-// and returns the number of content bytes written. Entries that can't be read
-// or aren't supported are skipped with a warning instead of failing the backup.
-func (l *Location) writeEntry(ctx context.Context, w *ArchiveWriter, path string) (int64, error) {
-	// Lstat so symlinks are archived as links rather than followed
-	info, err := os.Lstat(path)
-	if err != nil {
-		l.warnings = append(l.warnings, err.Error())
-		return 0, nil
-	}
-
-	var link string
-	switch mode := info.Mode(); {
-	case mode.IsRegular(), mode.IsDir():
-	case mode&os.ModeSymlink != 0:
-		if link, err = os.Readlink(path); err != nil {
-			l.warnings = append(l.warnings, err.Error())
-			return 0, nil
-		}
-	default:
-		l.warnings = append(l.warnings, fmt.Sprintf("%s: unsupported file type (socket, named pipe or device)", path))
-		return 0, nil
-	}
-
-	// Open regular files before writing the header so an unreadable file can
-	// still be skipped
-	var file *os.File
-	if info.Mode().IsRegular() {
-		if file, err = os.Open(path); err != nil {
-			l.warnings = append(l.warnings, err.Error())
-			return 0, nil
-		}
-		defer file.Close()
+// writeEntry writes a prepared file, directory or symlink entry to the archive
+func (l *Location) writeEntry(ctx context.Context, w *ArchiveWriter, p preparedEntry) error {
+	if p.file != nil {
+		defer p.file.Close()
 	}
 
 	// Calculate relative path
-	relPath, err := filepath.Rel(l.Path, path)
+	relPath, err := filepath.Rel(l.Path, p.path)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	// Create tar header
-	hdr, err := tar.FileInfoHeader(info, link)
+	hdr, err := tar.FileInfoHeader(p.info, p.link)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	// Prepend original directory name so extraction creates proper folder structure
@@ -262,27 +358,32 @@ func (l *Location) writeEntry(ctx context.Context, w *ArchiveWriter, path string
 
 	// Write header
 	if err := w.WriteHeader(hdr); err != nil {
-		return 0, err
+		return err
 	}
 
-	if file == nil {
-		return 0, nil
+	if p.data != nil {
+		_, err := w.Write(p.data)
+		return err
+	}
+	if p.file == nil {
+		return nil
 	}
 
-	// Copy exactly the size recorded in the header; growth is truncated
-	n, err := io.CopyN(w, ctxReader{ctx, file}, hdr.Size)
+	// Stream large files, copying exactly the size recorded in the header;
+	// growth is truncated
+	n, err := io.CopyN(w, ctxReader{ctx, p.file}, hdr.Size)
 	if err != nil {
 		if ctx.Err() != nil {
-			return n, ctx.Err()
+			return ctx.Err()
 		}
 		// The file shrank or failed mid-read; pad so the archive stays valid
 		if _, padErr := io.CopyN(w, zeroReader{}, hdr.Size-n); padErr != nil {
-			return n, padErr
+			return padErr
 		}
-		l.warnings = append(l.warnings, fmt.Sprintf("%s: changed during backup, archived copy is incomplete (%v)", path, err))
+		l.warnings = append(l.warnings, fmt.Sprintf("%s: changed during backup, archived copy is incomplete (%v)", p.path, err))
 	}
 
-	return hdr.Size, nil
+	return nil
 }
 
 // copyConfigToBackup copies the config file to the backup directory
