@@ -36,14 +36,18 @@ replace the currently installed binary with it.`,
 		latest, err := update.Latest(ctx)
 		exitOnError(err)
 
-		current := "v" + version
+		// Release tags carry a "v" prefix while the injected version does not
+		current := version
+		if version != "dev" {
+			current = "v" + version
+		}
 		upToDate := version != "dev" && semver.Compare(current, latest) >= 0
 
 		if checkOnly {
 			if upToDate {
 				fmt.Printf("macup is up to date (%s)\n", current)
 			} else {
-				fmt.Printf("A new version is available: %s -> %s\n", version, latest)
+				fmt.Printf("A new version is available: %s -> %s\n", current, latest)
 				fmt.Println("Run 'macup upgrade' to install it.")
 			}
 			return
@@ -60,7 +64,7 @@ replace the currently installed binary with it.`,
 			}
 		}
 
-		fmt.Printf("Upgrading macup %s -> %s...\n", version, latest)
+		fmt.Printf("Upgrading macup %s -> %s...\n", current, latest)
 		exitOnError(update.Apply(ctx, latest))
 		fmt.Printf("✓ macup upgraded to %s\n", latest)
 	},
