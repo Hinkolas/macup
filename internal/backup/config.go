@@ -15,6 +15,12 @@ type Config struct {
 
 func LoadConfig(path string) (*Config, error) {
 
+	// Expand "~" ourselves: the flag default never passes through a shell
+	path, err := normalizePath(path)
+	if err != nil {
+		return nil, err
+	}
+
 	v := viper.NewWithOptions(viper.KeyDelimiter("|"))
 	v.SetConfigType("yaml")
 	v.SetConfigFile(path)
