@@ -67,7 +67,7 @@ func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui
 	// Progress is measured in compressed bytes read from the archive, which
 	// is the only total known before extracting. Decompression reads a few
 	// MB ahead of extraction, so progress leads slightly on small archives.
-	tracker := startProgress(pv, targetPath, archiveSize)
+	tracker := startProgress(pv, targetPath, archiveSize, 0)
 	defer tracker.finish()
 
 	// Create gzip reader. pgzip otherwise reads the archive through a 4KB

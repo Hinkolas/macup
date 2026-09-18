@@ -8,32 +8,58 @@ import (
 	"github.com/hinkolas/macup/internal/tui"
 )
 
-// progressInterval matches the progress view's redraw rate
-const progressInterval = 100 * time.Millisecond
+const (
+	// progressInterval matches the progress view's redraw rate
+	progressInterval = 100 * time.Millisecond
+	// etaWindow is how far back the ETA looks to measure the current rate.
+	// Throughput swings between directories of tiny files and large files
+	// and when the destination stalls to flush, so the average since the
+	// start overreacts early on and lags behind later.
+	etaWindow = 20 * time.Second
+	// etaWarmup is how long to measure before showing an ETA at all
+	etaWarmup = 3 * time.Second
+)
 
-// progressTracker reports progress for one location. Work is counted with
-// add, which is safe to call from any goroutine and cheap enough to call for
-// every chunk of data, and a background goroutine periodically turns the
-// count into a progress fraction and ETA.
+// progressTracker reports progress for one location. Work is counted in
+// bytes and, where the number of entries is known up front, in entries.
+// Progress is the average of both, since time depends on both: a directory
+// of tiny files takes long but moves few bytes. The add methods are safe to
+// call from any goroutine and cheap enough to call for every chunk of data;
+// a background goroutine periodically turns the counts into a progress
+// fraction and ETA.
 type progressTracker struct {
-	pv       *tui.ProgressView
-	location string
-	total    int64
-	done     atomic.Int64
-	start    time.Time
-	stop     chan struct{}
-	stopped  chan struct{}
+	pv         *tui.ProgressView
+	location   string
+	totalBytes int64
+	totalItems int64
+	doneBytes  atomic.Int64
+	doneItems  atomic.Int64
+	start      time.Time
+	stop       chan struct{}
+	stopped    chan struct{}
+
+	// Owned by the reporting goroutine
+	samples []progressSample
+	eta     time.Duration
 }
 
-// startProgress starts reporting progress for location out of total units
-func startProgress(pv *tui.ProgressView, location string, total int64) *progressTracker {
+// progressSample is the progress at one point in time
+type progressSample struct {
+	at       time.Time
+	progress float64
+}
+
+// startProgress starts reporting progress for location out of totalBytes
+// bytes and totalItems entries. A total of zero leaves that measure out.
+func startProgress(pv *tui.ProgressView, location string, totalBytes, totalItems int64) *progressTracker {
 	t := &progressTracker{
-		pv:       pv,
-		location: location,
-		total:    total,
-		start:    time.Now(),
-		stop:     make(chan struct{}),
-		stopped:  make(chan struct{}),
+		pv:         pv,
+		location:   location,
+		totalBytes: totalBytes,
+		totalItems: totalItems,
+		start:      time.Now(),
+		stop:       make(chan struct{}),
+		stopped:    make(chan struct{}),
 	}
 
 	go func() {
@@ -42,8 +68,8 @@ func startProgress(pv *tui.ProgressView, location string, total int64) *progress
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ticker.C:
-				t.report()
+			case now := <-ticker.C:
+				t.report(now)
 			case <-t.stop:
 				return
 			}
@@ -53,28 +79,56 @@ func startProgress(pv *tui.ProgressView, location string, total int64) *progress
 	return t
 }
 
-// add counts n units of completed work
+// add counts n bytes of completed work
 func (t *progressTracker) add(n int64) {
-	t.done.Add(n)
+	t.doneBytes.Add(n)
+}
+
+// addItems counts n completed entries
+func (t *progressTracker) addItems(n int64) {
+	t.doneItems.Add(n)
+}
+
+// progress returns the completed fraction of the work
+func (t *progressTracker) progress() float64 {
+	var sum float64
+	var measures int
+	if t.totalBytes > 0 {
+		sum += float64(t.doneBytes.Load()) / float64(t.totalBytes)
+		measures++
+	}
+	if t.totalItems > 0 {
+		sum += float64(t.doneItems.Load()) / float64(t.totalItems)
+		measures++
+	}
+	if measures == 0 {
+		return 0
+	}
+	return sum / float64(measures)
 }
 
 // report sends the current progress and ETA to the progress view. Progress
 // is kept just below 1.0 because the view treats 1.0 as done, which only the
 // caller can decide.
-func (t *progressTracker) report() {
-	if t.total <= 0 {
-		return
+func (t *progressTracker) report(now time.Time) {
+	progress := min(t.progress(), 0.999)
+
+	// Keep the samples within the window, plus the newest one before it so
+	// the rate always spans the full window
+	t.samples = append(t.samples, progressSample{now, progress})
+	for len(t.samples) > 2 && now.Sub(t.samples[1].at) >= etaWindow {
+		t.samples = t.samples[1:]
 	}
 
-	progress := min(float64(t.done.Load())/float64(t.total), 0.999)
-
-	var eta time.Duration
-	if progress > 0 {
-		elapsed := time.Since(t.start)
-		eta = max(time.Duration(float64(elapsed)/progress)-elapsed, 0)
+	// Estimate from the rate over the window. While nothing moves, keep the
+	// last estimate rather than jumping to infinity.
+	oldest := t.samples[0]
+	if now.Sub(t.start) >= etaWarmup && progress > oldest.progress {
+		rate := (progress - oldest.progress) / now.Sub(oldest.at).Seconds()
+		t.eta = time.Duration((1 - progress) / rate * float64(time.Second))
 	}
 
-	t.pv.Set(t.location, progress, eta)
+	t.pv.Set(t.location, progress, t.eta)
 }
 
 // finish stops reporting. It is safe to call more than once.

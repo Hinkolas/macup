@@ -266,14 +266,9 @@ func (l *Location) writeToArchive(ctx context.Context, w *ArchiveWriter, pv *tui
 	}()
 
 	// Track content bytes as they are written, so large files show progress
-	// while they are copied. Locations with only empty files and directories
-	// count entries instead.
-	byEntries := l.totalSize == 0
-	total := l.totalSize
-	if byEntries {
-		total = int64(len(l.index))
-	}
-	tracker := startProgress(pv, l.Path, total)
+	// while they are copied, and entries, since many small files take long
+	// but move few bytes
+	tracker := startProgress(pv, l.Path, l.totalSize, int64(len(l.index)))
 	defer tracker.finish()
 
 	for out := range ordered {
@@ -291,10 +286,7 @@ func (l *Location) writeToArchive(ctx context.Context, w *ArchiveWriter, pv *tui
 			l.warnings = append(l.warnings, p.warning)
 		}
 
-		switch {
-		case byEntries:
-			tracker.add(1)
-		case p.skip && p.info.Mode().IsRegular():
+		if p.skip && p.info.Mode().IsRegular() {
 			// Count skipped files as done so progress still reaches the total
 			tracker.add(p.info.Size())
 		}
@@ -304,6 +296,7 @@ func (l *Location) writeToArchive(ctx context.Context, w *ArchiveWriter, pv *tui
 				return fmt.Errorf("failed to write %s: %w", p.path, err)
 			}
 		}
+		tracker.addItems(1)
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -344,12 +337,8 @@ func (l *Location) writeEntry(ctx context.Context, w *ArchiveWriter, p preparedE
 		return err
 	}
 
-	// Count content bytes for progress; the tracker ignores them when
-	// counting entries
-	cw := io.Writer(w)
-	if l.totalSize > 0 {
-		cw = countingWriter{w, tracker}
-	}
+	// Count content bytes for progress
+	cw := countingWriter{w, tracker}
 
 	if p.data != nil {
 		_, err := cw.Write(p.data)
