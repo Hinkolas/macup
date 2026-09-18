@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/hinkolas/macup/internal/backup"
 	"github.com/spf13/cobra"
@@ -38,11 +41,11 @@ each archive to its original location as specified in the config.`,
 		}
 
 		// Restore the backup
-		err := backup.Restore(backupDir)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
+		err := backup.Restore(ctx, backupDir)
+		exitOnError(err)
 
 	},
 }

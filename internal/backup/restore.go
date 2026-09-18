@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
@@ -8,7 +9,7 @@ import (
 )
 
 // Restore restores a backup from the specified backup directory
-func Restore(backupDir string) error {
+func Restore(ctx context.Context, backupDir string) error {
 	// Load config from backup directory
 	configPath := filepath.Join(backupDir, "config.yaml")
 	config, err := LoadConfig(configPath)
@@ -31,7 +32,7 @@ func Restore(backupDir string) error {
 
 	// Restore each location
 	for _, loc := range config.Data.Locations {
-		if err := restoreLocation(loc, backupDir, pv); err != nil {
+		if err := restoreLocation(ctx, loc, backupDir, pv); err != nil {
 			pv.Clear() // Clear on error
 			return fmt.Errorf("failed to restore %s: %w", loc.Path, err)
 		}

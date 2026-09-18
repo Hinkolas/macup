@@ -1,12 +1,13 @@
 package backup
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
 
 // Create creates a backup of all configured locations
-func Create(config *Config, configPath string) error {
+func Create(ctx context.Context, config *Config, configPath string) error {
 	// Create output directory
 	err := os.MkdirAll(config.Output, 0755)
 	if err != nil {
@@ -19,7 +20,7 @@ func Create(config *Config, configPath string) error {
 	}
 
 	// Backup all data locations
-	if err := BackupData(config); err != nil {
+	if err := BackupData(ctx, config); err != nil {
 		return err
 	}
 

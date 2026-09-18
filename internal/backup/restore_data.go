@@ -2,6 +2,8 @@ package backup
 
 import (
 	"archive/tar"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +16,7 @@ import (
 )
 
 // restoreLocation restores a single location from its archive
-func restoreLocation(loc Location, backupDir string, pv *tui.ProgressView) error {
+func restoreLocation(ctx context.Context, loc Location, backupDir string, pv *tui.ProgressView) error {
 	// Generate the archive filename based on the ORIGINAL config path (before normalization)
 	// This must match the hash used during backup creation
 	archiveName := generateFilename(loc.Path)
@@ -32,7 +34,7 @@ func restoreLocation(loc Location, backupDir string, pv *tui.ProgressView) error
 	}
 
 	// Extract the archive with progress tracking
-	if err := extractArchive(archivePath, targetPath, pv); err != nil {
+	if err := extractArchive(ctx, archivePath, targetPath, pv); err != nil {
 		return fmt.Errorf("extraction failed: %w", err)
 	}
 
@@ -44,7 +46,7 @@ func restoreLocation(loc Location, backupDir string, pv *tui.ProgressView) error
 }
 
 // extractArchive extracts a tar.gz archive to the target directory with progress tracking
-func extractArchive(archivePath, targetPath string, pv *tui.ProgressView) error {
+func extractArchive(ctx context.Context, archivePath, targetPath string, pv *tui.ProgressView) error {
 	// Open the archive file
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -79,6 +81,10 @@ func extractArchive(archivePath, targetPath string, pv *tui.ProgressView) error 
 
 	// Extract all files
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		header, err := tarReader.Next()
 		if err == io.EOF {
 			break // End of archive
@@ -140,7 +146,7 @@ func extractArchive(archivePath, targetPath string, pv *tui.ProgressView) error 
 			}
 
 			// Create and write file
-			if err := extractFile(tarReader, extractPath, os.FileMode(header.Mode)); err != nil {
+			if err := extractFile(ctxReader{ctx, tarReader}, extractPath, os.FileMode(header.Mode)); err != nil {
 				return fmt.Errorf("failed to extract file %s: %w", extractPath, err)
 			}
 
@@ -148,6 +154,11 @@ func extractArchive(archivePath, targetPath string, pv *tui.ProgressView) error 
 			// Create parent directories if they don't exist
 			if err := os.MkdirAll(filepath.Dir(extractPath), 0755); err != nil {
 				return fmt.Errorf("failed to create parent directory: %w", err)
+			}
+
+			// Replace any existing entry so restoring over an existing tree works
+			if err := os.Remove(extractPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("failed to replace %s: %w", extractPath, err)
 			}
 
 			// Create symlink
@@ -170,12 +181,12 @@ func extractFile(tarReader io.Reader, path string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer outFile.Close()
 
 	// Copy content
 	if _, err := io.Copy(outFile, tarReader); err != nil {
+		outFile.Close()
 		return err
 	}
 
-	return nil
+	return outFile.Close()
 }
