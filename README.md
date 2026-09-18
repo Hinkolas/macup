@@ -19,6 +19,19 @@ macup upgrade          # install the latest release
 macup upgrade --check  # only check whether a newer release exists
 ```
 
+## Back up .env files
+```sh
+macup env -o ./env-backup          # search the locations from your config
+macup env -p ~/Github -o ./envs    # search specific directories instead
+macup env --pattern '.env' --pattern '*.pem'  # choose which file names to copy
+```
+
+Copies every `.env` and `.env.*` file as a plain, uncompressed file, so you can
+grab a single one later without restoring a whole backup. Copies keep their
+path relative to your home directory (e.g. `envs/Github/app/.env`), and are
+only readable by you since they usually contain secrets. Directories listed
+under a location's `ignore` are skipped.
+
 ## Releasing
 Releases are built by [GoReleaser](https://goreleaser.com) in GitHub Actions
 when a version tag is pushed:
