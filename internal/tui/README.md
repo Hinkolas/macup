@@ -10,7 +10,7 @@ A simple terminal user interface package for displaying progress bars during bac
 - Color-coded status messages (green DONE ✔, ETA, etc.)
 - Current file being written display
 - Thread-safe updates
-- Automatic terminal detection
+- Automatic terminal detection (plain line output when stdout is not a terminal)
 
 ## Usage
 
@@ -18,7 +18,7 @@ A simple terminal user interface package for displaying progress bars during bac
 import "github.com/hinkolas/macup/internal/tui"
 
 // Create a new progress view
-pv := tui.NewProgressView()
+pv := tui.NewProgressView("Archiving")
 
 // Add a new progress bar
 pv.Add("~/github", 0.0, 0)
@@ -39,18 +39,12 @@ pv.Finish("✓ Backup successfully stored at ./backup")
 // Or use Clear() only for error cases
 // pv.Clear()
 
-// Check if running in a terminal
-if tui.IsTerminal() {
-    // Use TUI
-} else {
-    // Fall back to plain logs
-}
 ```
 
 ## API
 
-### `NewProgressView() *ProgressView`
-Creates a new progress view instance.
+### `NewProgressView(messagePrefix string) *ProgressView`
+Creates a new progress view instance. `messagePrefix` is shown before the status message (e.g. "Archiving: <path>").
 
 ### `Add(location string, progress float64, eta time.Duration)`
 Adds a new progress bar for a location.
@@ -104,8 +98,8 @@ Writing: ~/github/schneider-group/ugm-website/src
 - Uses ANSI escape sequences for terminal manipulation
 - Thread-safe with mutex locks
 - Progress bars are 42 characters wide
-- Rate limited updates (max 1 update per 10ms) to prevent terminal overload
-- Smart rendering: only updates when visual changes occur
+- Updates only change state; a background goroutine redraws every 100ms, so rendering never slows down the work
+- Each frame is written with a single write, and only when something visibly changed
 - Automatic cursor hiding during operation
 - Full file paths displayed (wraps if needed, automatically cleared)
 - Final state remains on screen after completion

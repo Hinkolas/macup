@@ -15,6 +15,15 @@ import (
 	"github.com/klauspost/pgzip"
 )
 
+const (
+	// Files up to this size are read into memory so several can be read or
+	// written concurrently; larger files are streamed
+	smallFileLimit = 1 << 20
+	// Number of goroutines reading files during backup or writing them during
+	// restore. More workers mostly add file system lock contention on APFS.
+	ioWorkers = 4
+)
+
 // Data contains backup configuration for multiple locations
 type Data struct {
 	Locations []Location `mapstructure:"locations"`
@@ -22,11 +31,17 @@ type Data struct {
 
 // Location represents a directory to backup with ignore patterns
 type Location struct {
-	Path      string   `mapstructure:"path"`
-	Ignore    []string `mapstructure:"ignore"`
-	index     []string // Paths to include in backup
-	totalSize int64    // Total size of files to backup
-	warnings  []string // Files skipped during scan or write
+	Path      string       `mapstructure:"path"`
+	Ignore    []string     `mapstructure:"ignore"`
+	index     []indexEntry // Entries to include in backup
+	totalSize int64        // Total size of files to backup
+	warnings  []string     // Files skipped during scan or write
+}
+
+// indexEntry is a path found during the scan with its (non-followed) file info
+type indexEntry struct {
+	path string
+	info os.FileInfo
 }
 
 // ArchiveWriter wraps tar.Writer with compression. The archive is written to
