@@ -10,8 +10,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is set at build time via -ldflags by GoReleaser
+var version = "dev"
+
 var rootCmd = &cobra.Command{
-	Version: fmt.Sprintf("%s, %s/%s", "0.0.1", runtime.GOOS, runtime.GOARCH),
+	Version: fmt.Sprintf("%s, %s/%s", version, runtime.GOOS, runtime.GOARCH),
 	Use:     "macup",
 	Short:   "Backup and restore your macOS setup with one command.",
 	Long: `A Go-powered CLI to back up and restore your macOS setup.

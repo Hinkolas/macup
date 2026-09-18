@@ -1,0 +1,49 @@
+version: 2
+
+project_name: macup
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: macup
+    main: .
+    binary: macup
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/hinkolas/macup/cmd.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    # Unversioned names keep asset URLs stable for install.sh and `macup upgrade`
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: Hinkolas
+    name: macup
+  prerelease: auto
