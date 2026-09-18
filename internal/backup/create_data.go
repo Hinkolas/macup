@@ -378,6 +378,11 @@ func (l *Location) writeEntry(ctx context.Context, w *ArchiveWriter, p preparedE
 
 // copyConfigToBackup copies the config file to the backup directory
 func copyConfigToBackup(configPath, outputDir string) error {
+	configPath, err := normalizePath(configPath)
+	if err != nil {
+		return err
+	}
+
 	// Open source config file
 	src, err := os.Open(configPath)
 	if err != nil {
