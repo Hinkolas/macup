@@ -19,18 +19,59 @@ macup upgrade          # install the latest release
 macup upgrade --check  # only check whether a newer release exists
 ```
 
-## Back up .env files
-```sh
-macup env -o ./env-backup          # search the locations from your config
-macup env -p ~/Github -o ./envs    # search specific directories instead
-macup env --pattern '.env' --pattern '*.pem'  # choose which file names to copy
+## Usage
+See the [usage guide](docs/usage.md) for all options and details.
+
+### 1. Configure what to back up
+Create `~/.config/macup/config.yaml` and list the directories to back up:
+
+```yaml
+data:
+  locations:
+    - path: ~/Github
+      ignore:          # file or directory names skipped at any depth
+        - node_modules
+        - .venv
+    - path: ~/Documents
+    - path: ~/.ssh
 ```
 
-Copies every `.env` and `.env.*` file as a plain, uncompressed file, so you can
-grab a single one later without restoring a whole backup. Copies keep their
-path relative to your home directory (e.g. `envs/Github/app/.env`), and are
-only readable by you since they usually contain secrets. Directories listed
-under a location's `ignore` are skipped.
+### 2. Create a backup
+```sh
+macup create -o ~/Backups/2026-10-20
+```
+
+Each location is stored as a compressed archive in the output directory,
+together with a copy of the config used to create it.
+
+The output can be any directory, including one on an external drive. Back up
+straight onto the drive without needing space on your Mac first:
+
+```sh
+macup create -o /Volumes/MyDrive/macup/2026-10-20
+```
+
+To always back up to the same place, set `output: /Volumes/MyDrive/macup` in
+your config and just run `macup create`.
+
+### 3. Restore it
+```sh
+macup restore -b /Volumes/MyDrive/macup/2026-10-20
+```
+
+Extracts every location back to its original path, using the config stored in
+the backup. Paths written with `~` are restored into the home directory of
+whoever runs the restore, so backups move between Macs and user names.
+
+### Back up .env files
+```sh
+macup env -o ./env-backup
+```
+
+Copies every `.env` and `.env.*` file from your locations as a plain,
+uncompressed file, so you can grab a single one later without restoring a
+whole backup. See the [usage guide](docs/usage.md#backing-up-env-files) for
+more options.
 
 ## Releasing
 Releases are built by [GoReleaser](https://goreleaser.com) in GitHub Actions
