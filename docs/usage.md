@@ -35,7 +35,7 @@ data:
 
 | Key | Description |
 | --- | --- |
-| `output` | Directory the backup is written to. Relative paths are resolved from the directory you run macup in. Use an absolute path here, as `~` is not expanded in this value. |
+| `output` | Directory the backup is written to. `~` is expanded to your home directory, and relative paths are resolved from the directory you run macup in. |
 | `data.locations` | List of directories to back up. At least one is required. |
 | `data.locations[].path` | Directory to back up. `~` is expanded to your home directory. |
 | `data.locations[].ignore` | File or directory names to skip, at any depth below the location. An ignored directory is skipped with everything inside it. |
